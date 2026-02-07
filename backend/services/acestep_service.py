@@ -36,9 +36,9 @@ import json
 import secrets
 import random
 
-# ACE-Step API Configuration
+# ACE-Step API Configuration (Gradio server)
 ACESTEP_HOST = os.getenv("ACESTEP_HOST", "http://localhost")
-ACESTEP_PORT = int(os.getenv("ACESTEP_PORT", "8001"))
+ACESTEP_PORT = int(os.getenv("ACESTEP_PORT", "7870"))
 ACESTEP_BASE_URL = f"{ACESTEP_HOST}:{ACESTEP_PORT}"
 
 # Checkpoint path (user should configure this)
