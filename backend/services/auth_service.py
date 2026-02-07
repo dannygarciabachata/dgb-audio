@@ -2,6 +2,7 @@
 DGB AUDIO - Authentication Service
 ===================================
 User registration, login, and JWT token management.
+Now uses SQLite database instead of JSON files.
 """
 
 import os
@@ -9,37 +10,21 @@ import hashlib
 import secrets
 from datetime import datetime, timedelta
 from typing import Optional
+import sys
 from pathlib import Path
-import json
+
+# Add parent directory to path for database import
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from database import (
+    get_user_by_email, get_user_by_id, get_user_by_token as db_get_user_by_token,
+    create_user as db_create_user, create_session, delete_session,
+    save_api_key, get_api_key, track_api_usage as db_track_api_usage,
+    get_user_usage_stats, update_user, get_connection
+)
 
 # Configuration
 SECRET_KEY = os.getenv("DGB_SECRET_KEY", secrets.token_hex(32))
 TOKEN_EXPIRE_HOURS = 24
-
-# Users file (will migrate to SQLite)
-USERS_FILE = Path(__file__).parent.parent / "data" / "users.json"
-
-
-def _ensure_data_dir():
-    """Ensure data directory exists"""
-    USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if not USERS_FILE.exists():
-        with open(USERS_FILE, 'w') as f:
-            json.dump({}, f)
-
-
-def _load_users() -> dict:
-    """Load users from file"""
-    _ensure_data_dir()
-    with open(USERS_FILE, 'r') as f:
-        return json.load(f)
-
-
-def _save_users(users: dict):
-    """Save users to file"""
-    _ensure_data_dir()
-    with open(USERS_FILE, 'w') as f:
-        json.dump(users, f, indent=2)
 
 
 def hash_password(password: str) -> str:
@@ -68,7 +53,6 @@ def generate_token(user_id: str) -> str:
 
 def encrypt_api_key(api_key: str) -> str:
     """Simple encryption for API key (use proper encryption in production)"""
-    # Base64 encode with a marker - in production use Fernet or similar
     import base64
     encoded = base64.b64encode(api_key.encode()).decode()
     return f"dgb:{encoded}"
@@ -83,61 +67,91 @@ def decrypt_api_key(encrypted: str) -> str:
     return encrypted
 
 
+# Plan configuration
+PLAN_CONFIG = {
+    "starter": {"storage_gb": 1, "recording_seconds": 30, "max_projects": 2},
+    "creator": {"storage_gb": 10, "recording_seconds": 60, "max_projects": 20},
+    "pro": {"storage_gb": 50, "recording_seconds": -1, "max_projects": -1},
+    "studio": {"storage_gb": 200, "recording_seconds": -1, "max_projects": -1}
+}
+
+# Role permissions
+ROLE_PERMISSIONS = {
+    "superadmin": ["all", "manage_users", "manage_plans", "view_analytics", "manage_roles", "system_config"],
+    "admin": ["manage_own_users", "view_own_analytics", "manage_samples"],
+    "user": ["create_music", "upload_samples", "use_chat"]
+}
+
+
 # ============================================================================
 # USER MANAGEMENT
 # ============================================================================
 
 def register_user(email: str, password: str, name: str, plan: str = "starter", role: str = "user") -> dict:
     """Register a new user"""
-    users = _load_users()
-    
     # Check if email exists
-    if email in users:
+    existing = get_user_by_email(email)
+    if existing:
         return {"error": "Email already registered"}
     
     user_id = f"usr_{secrets.token_hex(8)}"
+    password_hash = hash_password(password)
+    permissions = ROLE_PERMISSIONS.get(role, ROLE_PERMISSIONS["user"])
+    limits = PLAN_CONFIG.get(plan, PLAN_CONFIG["starter"])
     
-    # Plan limits
-    plan_config = {
-        "starter": {"storage_gb": 1, "recording_seconds": 30, "max_projects": 2},
-        "creator": {"storage_gb": 10, "recording_seconds": 60, "max_projects": 20},
-        "pro": {"storage_gb": 50, "recording_seconds": -1, "max_projects": -1},
-        "studio": {"storage_gb": 200, "recording_seconds": -1, "max_projects": -1}
-    }
+    success = db_create_user(
+        user_id=user_id,
+        email=email,
+        password_hash=password_hash,
+        name=name,
+        plan=plan,
+        role=role,
+        permissions=permissions,
+        limits=limits
+    )
     
-    # Role permissions
-    role_permissions = {
-        "superadmin": ["all", "manage_users", "manage_plans", "view_analytics", "manage_roles", "system_config"],
-        "admin": ["manage_own_users", "view_own_analytics", "manage_samples"],
-        "user": ["create_music", "upload_samples", "use_chat"]
-    }
+    if success:
+        user = get_user_by_email(email)
+        safe_user = {k: v for k, v in user.items() if k != "password_hash"}
+        return {"success": True, "user": safe_user}
     
-    user = {
-        "id": user_id,
-        "email": email,
-        "name": name,
-        "password_hash": hash_password(password),
-        "plan": plan,
-        "role": role,
-        "permissions": role_permissions.get(role, role_permissions["user"]),
-        "limits": plan_config.get(plan, plan_config["starter"]),
-        "openai_key_encrypted": None,
-        "usage": {
-            "tokens_used": 0,
-            "estimated_cost_usd": 0.0,
-            "storage_used_bytes": 0,
-            "requests_count": 0
-        },
-        "created_at": datetime.now().isoformat(),
-        "updated_at": datetime.now().isoformat()
-    }
+    return {"error": "Failed to create user"}
+
+
+def login_user(email: str, password: str) -> dict:
+    """Login a user"""
+    user = get_user_by_email(email)
     
-    users[email] = user
-    _save_users(users)
+    if not user:
+        return {"error": "Invalid email or password"}
     
-    # Return user without password
+    if not verify_password(password, user["password_hash"]):
+        return {"error": "Invalid email or password"}
+    
+    # Generate and store token
+    token = generate_token(user["id"])
+    expires_at = (datetime.now() + timedelta(hours=TOKEN_EXPIRE_HOURS)).isoformat()
+    
+    create_session(user["id"], token, expires_at)
+    
     safe_user = {k: v for k, v in user.items() if k != "password_hash"}
-    return {"success": True, "user": safe_user}
+    return {"success": True, "token": token, "user": safe_user}
+
+
+def logout_user(token: str) -> dict:
+    """Logout a user by deleting their session"""
+    if delete_session(token):
+        return {"success": True, "message": "Logged out successfully"}
+    return {"error": "Session not found"}
+
+
+def get_user_by_token(token: str) -> Optional[dict]:
+    """Get user by authentication token"""
+    user = db_get_user_by_token(token)
+    if user:
+        safe_user = {k: v for k, v in user.items() if k != "password_hash"}
+        return safe_user
+    return None
 
 
 # ============================================================================
@@ -146,158 +160,128 @@ def register_user(email: str, password: str, name: str, plan: str = "starter", r
 
 def get_all_users(requester_email: str) -> dict:
     """Get all users (SuperAdmin only)"""
-    users = _load_users()
+    requester = get_user_by_email(requester_email)
     
-    requester = users.get(requester_email)
     if not requester or requester.get("role") != "superadmin":
         return {"error": "Unauthorized - SuperAdmin only"}
     
-    # Return users without passwords
-    safe_users = []
-    for user in users.values():
-        safe_user = {k: v for k, v in user.items() if k != "password_hash"}
-        safe_users.append(safe_user)
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM users ORDER BY created_at DESC")
+        users = []
+        for row in cursor.fetchall():
+            user = dict(row)
+            # Remove password, parse JSON fields
+            user.pop("password_hash", None)
+            import json
+            user['permissions'] = json.loads(user.get('permissions', '[]'))
+            user['limits'] = json.loads(user.get('limits', '{}'))
+            users.append(user)
     
-    return {"users": safe_users, "total": len(safe_users)}
+    return {"users": users, "total": len(users)}
 
 
 def update_user_role(requester_email: str, target_email: str, new_role: str) -> dict:
     """Update a user's role (SuperAdmin only)"""
-    users = _load_users()
+    requester = get_user_by_email(requester_email)
     
-    requester = users.get(requester_email)
     if not requester or requester.get("role") != "superadmin":
         return {"error": "Unauthorized - SuperAdmin only"}
     
-    if target_email not in users:
+    target = get_user_by_email(target_email)
+    if not target:
         return {"error": "User not found"}
     
-    role_permissions = {
-        "superadmin": ["all", "manage_users", "manage_plans", "view_analytics", "manage_roles", "system_config"],
-        "admin": ["manage_own_users", "view_own_analytics", "manage_samples"],
-        "user": ["create_music", "upload_samples", "use_chat"]
-    }
+    permissions = ROLE_PERMISSIONS.get(new_role, ROLE_PERMISSIONS["user"])
     
-    users[target_email]["role"] = new_role
-    users[target_email]["permissions"] = role_permissions.get(new_role, role_permissions["user"])
-    users[target_email]["updated_at"] = datetime.now().isoformat()
-    _save_users(users)
+    success = update_user(target["id"], role=new_role, permissions=permissions)
     
-    return {"success": True, "message": f"Role updated to {new_role}"}
+    if success:
+        return {"success": True, "message": f"Role updated to {new_role}"}
+    return {"error": "Failed to update role"}
 
 
 def update_user_plan(requester_email: str, target_email: str, new_plan: str) -> dict:
     """Update a user's plan (SuperAdmin only)"""
-    users = _load_users()
+    requester = get_user_by_email(requester_email)
     
-    requester = users.get(requester_email)
     if not requester or requester.get("role") != "superadmin":
         return {"error": "Unauthorized - SuperAdmin only"}
     
-    if target_email not in users:
+    target = get_user_by_email(target_email)
+    if not target:
         return {"error": "User not found"}
     
-    plan_config = {
-        "starter": {"storage_gb": 1, "recording_seconds": 30, "max_projects": 2},
-        "creator": {"storage_gb": 10, "recording_seconds": 60, "max_projects": 20},
-        "pro": {"storage_gb": 50, "recording_seconds": -1, "max_projects": -1},
-        "studio": {"storage_gb": 200, "recording_seconds": -1, "max_projects": -1}
-    }
+    limits = PLAN_CONFIG.get(new_plan, PLAN_CONFIG["starter"])
     
-    users[target_email]["plan"] = new_plan
-    users[target_email]["limits"] = plan_config.get(new_plan, plan_config["starter"])
-    users[target_email]["updated_at"] = datetime.now().isoformat()
-    _save_users(users)
+    success = update_user(target["id"], plan=new_plan, limits=limits)
     
-    return {"success": True, "message": f"Plan updated to {new_plan}"}
+    if success:
+        return {"success": True, "message": f"Plan updated to {new_plan}"}
+    return {"error": "Failed to update plan"}
 
 
-def login_user(email: str, password: str) -> dict:
-    """Login a user"""
-    users = _load_users()
-    
-    if email not in users:
-        return {"error": "Invalid email or password"}
-    
-    user = users[email]
-    
-    if not verify_password(password, user["password_hash"]):
-        return {"error": "Invalid email or password"}
-    
-    # Generate token
-    token = generate_token(user["id"])
-    
-    # Store active token
-    user["active_token"] = token
-    user["token_expires"] = (datetime.now() + timedelta(hours=TOKEN_EXPIRE_HOURS)).isoformat()
-    users[email] = user
-    _save_users(users)
-    
-    safe_user = {k: v for k, v in user.items() if k not in ["password_hash", "active_token"]}
-    return {"success": True, "token": token, "user": safe_user}
-
-
-def get_user_by_token(token: str) -> Optional[dict]:
-    """Get user by authentication token"""
-    users = _load_users()
-    
-    for user in users.values():
-        if user.get("active_token") == token:
-            # Check expiration
-            expires = user.get("token_expires")
-            if expires and datetime.fromisoformat(expires) > datetime.now():
-                safe_user = {k: v for k, v in user.items() if k not in ["password_hash", "active_token"]}
-                return safe_user
-    
-    return None
-
+# ============================================================================
+# API KEY MANAGEMENT
+# ============================================================================
 
 def set_user_api_key(email: str, api_key: str) -> dict:
     """Set user's OpenAI API key"""
-    users = _load_users()
+    user = get_user_by_email(email)
     
-    if email not in users:
+    if not user:
         return {"error": "User not found"}
     
-    users[email]["openai_key_encrypted"] = encrypt_api_key(api_key)
-    users[email]["updated_at"] = datetime.now().isoformat()
-    _save_users(users)
+    encrypted = encrypt_api_key(api_key)
+    save_api_key(user["id"], encrypted)
     
     return {"success": True, "message": "API key saved"}
 
 
 def get_user_api_key(email: str) -> Optional[str]:
     """Get user's decrypted OpenAI API key"""
-    users = _load_users()
+    user = get_user_by_email(email)
     
-    if email not in users:
+    if not user:
         return None
     
-    encrypted = users[email].get("openai_key_encrypted")
+    encrypted = get_api_key(user["id"])
     if encrypted:
         return decrypt_api_key(encrypted)
     return None
 
 
-def track_api_usage(email: str, tokens: int, cost: float):
+# ============================================================================
+# USAGE TRACKING
+# ============================================================================
+
+def track_api_usage(email: str, tokens: int, cost: float, endpoint: str = None):
     """Track API usage for a user"""
-    users = _load_users()
+    user = get_user_by_email(email)
     
-    if email not in users:
+    if not user:
         return
     
-    users[email]["usage"]["tokens_used"] += tokens
-    users[email]["usage"]["estimated_cost_usd"] += cost
-    users[email]["usage"]["requests_count"] += 1
-    users[email]["updated_at"] = datetime.now().isoformat()
-    _save_users(users)
+    db_track_api_usage(user["id"], tokens, cost, endpoint)
 
 
 def get_user_usage(email: str) -> dict:
     """Get user's usage statistics"""
-    users = _load_users()
+    user = get_user_by_email(email)
     
-    if email not in users:
+    if not user:
         return {"error": "User not found"}
     
-    return users[email].get("usage", {})
+    return get_user_usage_stats(user["id"])
+
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+def get_user_by_id_safe(user_id: str) -> Optional[dict]:
+    """Get user by ID without password"""
+    user = get_user_by_id(user_id)
+    if user:
+        return {k: v for k, v in user.items() if k != "password_hash"}
+    return None

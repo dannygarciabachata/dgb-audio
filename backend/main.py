@@ -13,6 +13,9 @@ import os
 import json
 from pathlib import Path
 
+# Initialize database on import
+from database import init_db, get_db_stats, migrate_from_json
+
 # Initialize app
 app = FastAPI(
     title="DGB AUDIO API",
@@ -840,8 +843,131 @@ async def save_composition(token: str, composition: dict):
 
 
 # ============================================================================
+# EXPORT ENDPOINTS
+# ============================================================================
+
+class ExportProjectRequest(BaseModel):
+    project_id: str
+    project_name: str
+    daw: str = "protools"
+    include_midi: bool = True
+    include_audio: bool = True
+    include_stems: bool = False
+    bpm: int = 120
+    key: str = "Am"
+    genre: str = "bachata"
+
+class ExportTrackRequest(BaseModel):
+    track_path: str
+    track_name: str
+    daw: str = "protools"
+    format: Optional[str] = None
+
+@app.get("/api/export/daws")
+async def get_daw_options():
+    """Get all supported DAWs and their recommended settings"""
+    from services.export_service import get_daw_recommendations
+    return get_daw_recommendations()
+
+@app.get("/api/export/settings/{daw_id}")
+async def get_daw_settings(daw_id: str):
+    """Get export settings for a specific DAW"""
+    from services.export_service import get_export_settings_for_daw
+    return get_export_settings_for_daw(daw_id)
+
+@app.post("/api/export/project")
+async def export_project(token: str, data: ExportProjectRequest):
+    """Export entire project as ZIP with DAW-specific format"""
+    from services.auth_service import get_user_by_token
+    from services.export_service import create_export_package
+    from database import get_connection
+    
+    user = get_user_by_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    # Get project tracks from database
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+        SELECT * FROM compositions WHERE project_id = ? OR user_id = ?
+        """, (data.project_id, user["id"]))
+        compositions = cursor.fetchall()
+    
+    # Convert to track format
+    tracks = []
+    for comp in compositions:
+        tracks.append({
+            "name": comp["title"] or f"Track_{comp['id'][:8]}",
+            "instrument": comp["genre"] or "mixed",
+            "midi_path": comp["midi_path"],
+            "audio_path": comp["audio_path"]
+        })
+    
+    # If no compositions, create demo tracks
+    if not tracks:
+        tracks = [
+            {"name": "Requinto", "instrument": "requinto", "midi_path": None, "audio_path": None},
+            {"name": "Bongo", "instrument": "bongo", "midi_path": None, "audio_path": None},
+            {"name": "Bass", "instrument": "bass", "midi_path": None, "audio_path": None}
+        ]
+    
+    result = create_export_package(
+        project_id=data.project_id,
+        project_name=data.project_name,
+        tracks=tracks,
+        daw_id=data.daw,
+        include_midi=data.include_midi,
+        include_audio=data.include_audio,
+        include_stems=data.include_stems,
+        bpm=data.bpm,
+        key=data.key,
+        genre=data.genre
+    )
+    
+    return result
+
+@app.post("/api/export/track")
+async def export_track(token: str, data: ExportTrackRequest):
+    """Export a single track"""
+    from services.auth_service import get_user_by_token
+    from services.export_service import export_single_track
+    
+    user = get_user_by_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    return export_single_track(
+        track_path=data.track_path,
+        track_name=data.track_name,
+        daw_id=data.daw,
+        output_format=data.format
+    )
+
+@app.get("/api/export/history")
+async def get_export_history(token: str, limit: int = 20):
+    """Get recent exports"""
+    from services.auth_service import get_user_by_token
+    from services.export_service import get_export_history
+    
+    user = get_user_by_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    return {"exports": get_export_history(limit)}
+
+
+# ============================================================================
 # HEALTH CHECK
 # ============================================================================
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database on startup"""
+    init_db()
+    migrate_from_json()  # Migrate any existing JSON data
+    print("🚀 DGB AUDIO API started successfully!")
+
 
 @app.get("/api/health")
 async def health_check():
@@ -852,13 +978,28 @@ async def health_check():
     samples = get_samples_metadata()
     total_size = sum(s.get("file_size_bytes", 0) for s in samples)
     
+    # Get database stats
+    db_stats = get_db_stats()
+    
     return {
         "status": "healthy",
         "version": "1.0.0",
         "openai_configured": bool(config.get("openai_api_key")),
         "samples_dir": str(SAMPLES_DIR),
         "total_samples": len(samples),
-        "total_storage_mb": round(total_size / (1024 * 1024), 2)
+        "total_storage_mb": round(total_size / (1024 * 1024), 2),
+        "database": db_stats
+    }
+
+
+@app.get("/api/db/status")
+async def database_status():
+    """Get database status and statistics"""
+    stats = get_db_stats()
+    return {
+        "connected": True,
+        "tables": stats,
+        "message": "Database connected and operational"
     }
 
 
