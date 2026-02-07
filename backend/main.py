@@ -843,6 +843,133 @@ async def save_composition(token: str, composition: dict):
 
 
 # ============================================================================
+# ACE-STEP GENERATION ENDPOINTS (Antigravity Engine)
+# ============================================================================
+
+class GenerateMusicRequest(BaseModel):
+    prompt: str
+    lyrics: Optional[str] = ""
+    genre: str = "bachata"
+    bpm: int = 120
+    key: str = "Am"
+    duration: int = 120
+    antigravity: int = 50  # 0-100 creativity level
+
+class PresetRequest(BaseModel):
+    preset: str
+    prompt: str
+    lyrics: Optional[str] = ""
+
+@app.get("/api/acestep/health")
+async def acestep_health():
+    """Check ACE-Step server status"""
+    from services.acestep_service import check_acestep_health_sync
+    return check_acestep_health_sync()
+
+@app.get("/api/acestep/presets")
+async def get_presets():
+    """Get all DGB music presets"""
+    from services.acestep_service import list_presets
+    return list_presets()
+
+@app.get("/api/acestep/antigravity/{level}")
+async def get_antigravity_params(level: int):
+    """Preview Antigravity Engine parameters for a given level"""
+    from services.acestep_service import calculate_antigravity_params
+    return calculate_antigravity_params(level)
+
+@app.post("/api/generate/music")
+async def generate_music_endpoint(token: str, data: GenerateMusicRequest):
+    """
+    Generate music using ACE-Step with Antigravity Engine.
+    
+    The antigravity parameter (0-100) controls creativity:
+    - 0-20: Traditional - Stays close to genre conventions
+    - 20-50: Balanced - Some creative freedom
+    - 50-80: Creative - More experimental
+    - 80-100: Wild - Maximum creative chaos
+    """
+    from services.auth_service import get_user_by_token
+    from services.acestep_service import generate_music, calculate_antigravity_params
+    from database import create_composition, track_api_usage
+    import secrets
+    
+    user = get_user_by_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    # Generate music
+    result = await generate_music(
+        prompt=data.prompt,
+        lyrics=data.lyrics,
+        genre=data.genre,
+        bpm=data.bpm,
+        key=data.key,
+        duration=data.duration,
+        antigravity=data.antigravity,
+        user_id=user["id"]
+    )
+    
+    # Save to database if successful
+    if result.get("success"):
+        comp_id = f"comp_{secrets.token_hex(8)}"
+        create_composition(
+            comp_id=comp_id,
+            user_id=user["id"],
+            title=f"{data.genre.title()} - {data.prompt[:30]}",
+            genre=data.genre,
+            bpm=data.bpm,
+            key=data.key,
+            prompt=data.prompt,
+            lyrics=data.lyrics,
+            midi_path=None,
+            audio_path=result.get("audio_path"),
+            status="completed"
+        )
+        result["composition_id"] = comp_id
+    
+    return result
+
+@app.post("/api/generate/preset")
+async def generate_from_preset(token: str, data: PresetRequest):
+    """Generate music using a DGB preset"""
+    from services.auth_service import get_user_by_token
+    from services.acestep_service import generate_music, get_preset
+    
+    user = get_user_by_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    # Get preset configuration
+    preset = get_preset(data.preset)
+    
+    result = await generate_music(
+        prompt=data.prompt,
+        lyrics=data.lyrics,
+        genre=preset["genre"],
+        bpm=preset["bpm"],
+        key=preset["key"],
+        antigravity=preset["antigravity"],
+        user_id=user["id"]
+    )
+    
+    result["preset_used"] = data.preset
+    return result
+
+@app.get("/api/generate/status/{job_id}")
+async def get_generation_status(job_id: str, token: str):
+    """Get status of an ongoing music generation"""
+    from services.auth_service import get_user_by_token
+    from services.acestep_service import get_generation_status
+    
+    user = get_user_by_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    return await get_generation_status(job_id)
+
+
+# ============================================================================
 # EXPORT ENDPOINTS
 # ============================================================================
 
