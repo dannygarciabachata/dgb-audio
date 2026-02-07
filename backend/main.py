@@ -863,8 +863,8 @@ class PresetRequest(BaseModel):
 @app.get("/api/acestep/health")
 async def acestep_health():
     """Check ACE-Step server status"""
-    from services.acestep_service import check_acestep_health_sync
-    return check_acestep_health_sync()
+    from services.acestep_service import check_acestep_health
+    return check_acestep_health()
 
 @app.get("/api/acestep/presets")
 async def get_presets():
@@ -890,8 +890,8 @@ async def generate_music_endpoint(token: str, data: GenerateMusicRequest):
     - 80-100: Wild - Maximum creative chaos
     """
     from services.auth_service import get_user_by_token
-    from services.acestep_service import generate_music, calculate_antigravity_params
-    from database import create_composition, track_api_usage
+    from services.acestep_service import generate_music_async, calculate_antigravity_params
+    from database import create_composition
     import secrets
     
     user = get_user_by_token(token)
@@ -899,15 +899,11 @@ async def generate_music_endpoint(token: str, data: GenerateMusicRequest):
         raise HTTPException(status_code=401, detail="Invalid token")
     
     # Generate music
-    result = await generate_music(
-        prompt=data.prompt,
+    result = await generate_music_async(
+        prompt=f"{data.genre}, {data.prompt}",
         lyrics=data.lyrics,
-        genre=data.genre,
-        bpm=data.bpm,
-        key=data.key,
-        duration=data.duration,
-        antigravity=data.antigravity,
-        user_id=user["id"]
+        duration=float(data.duration),
+        antigravity=data.antigravity
     )
     
     # Save to database if successful
@@ -931,42 +927,56 @@ async def generate_music_endpoint(token: str, data: GenerateMusicRequest):
     return result
 
 @app.post("/api/generate/preset")
-async def generate_from_preset(token: str, data: PresetRequest):
+async def generate_from_preset_endpoint(token: str, data: PresetRequest):
     """Generate music using a DGB preset"""
     from services.auth_service import get_user_by_token
-    from services.acestep_service import generate_music, get_preset
+    from services.acestep_service import generate_from_preset
     
     user = get_user_by_token(token)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid token")
     
-    # Get preset configuration
-    preset = get_preset(data.preset)
-    
-    result = await generate_music(
-        prompt=data.prompt,
+    # Generate using preset
+    result = generate_from_preset(
+        preset_name=data.preset,
         lyrics=data.lyrics,
-        genre=preset["genre"],
-        bpm=preset["bpm"],
-        key=preset["key"],
-        antigravity=preset["antigravity"],
-        user_id=user["id"]
+        duration=60.0,
+        custom_prompt=data.prompt
     )
     
     result["preset_used"] = data.preset
     return result
 
 @app.get("/api/generate/status/{job_id}")
-async def get_generation_status(job_id: str, token: str):
+async def get_generation_status_endpoint(job_id: str, token: str):
     """Get status of an ongoing music generation"""
     from services.auth_service import get_user_by_token
-    from services.acestep_service import get_generation_status
+    from services.acestep_service import get_generated_audio
     
     user = get_user_by_token(token)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid token")
     
-    return await get_generation_status(job_id)
+    audio_path = get_generated_audio(job_id)
+    if audio_path:
+        return {"job_id": job_id, "status": "completed", "audio_path": audio_path}
+    return {"job_id": job_id, "status": "processing"}
+
+
+@app.get("/api/audio/{job_id}")
+async def serve_generated_audio(job_id: str):
+    """Serve generated audio file"""
+    from fastapi.responses import FileResponse
+    from services.acestep_service import get_generated_audio
+    
+    # Remove .wav extension if present
+    clean_id = job_id.replace(".wav", "")
+    audio_path = get_generated_audio(clean_id)
+    
+    if not audio_path:
+        raise HTTPException(status_code=404, detail="Audio not found")
+    
+    return FileResponse(audio_path, media_type="audio/wav", filename=f"{clean_id}.wav")
 
 
 # ============================================================================

@@ -1,52 +1,43 @@
 """
-DGB AUDIO - ACE-Step Service
-==============================
-Connects to ACE-Step 1.5 API server for local music generation.
-Implements the Antigravity Engine for creative control.
+DGB AUDIO - ACE-Step Service (Gradio Client Integration)
+=========================================================
+Connects to ACE-Step Gradio server for music generation.
+Uses the Gradio Client to call the Text2Music functions.
 
-ACE-Step API Parameters (from official repo):
-- audio_duration: float (seconds)
-- prompt: str (genre/style description)
-- lyrics: str (song lyrics with [Verse], [Chorus] tags)
-- infer_step: int (number of inference steps)
-- guidance_scale: float (adherence to prompt)
-- scheduler_type: str ("euler" recommended)
-- cfg_type: str ("apg" or "cfg")
-- omega_scale: float (omega parameter)
-- actual_seeds: List[int] (random seeds)
-- guidance_interval: float
-- guidance_interval_decay: float
-- min_guidance_scale: float
-- use_erg_tag: bool (ERG for tags)
-- use_erg_lyric: bool (ERG for lyrics)
-- use_erg_diffusion: bool (ERG for diffusion)
-- oss_steps: List[int] (OSS optimization steps)
-- guidance_scale_text: float
-- guidance_scale_lyric: float
+Architecture:
+    Next.js (3000) → FastAPI (8000) → ACE-Step/Gradio (7870)
 """
 
 import os
 import asyncio
-import aiohttp
-import requests
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 import json
 import secrets
 import random
+import shutil
 
-# ACE-Step API Configuration (Gradio server)
-ACESTEP_HOST = os.getenv("ACESTEP_HOST", "http://localhost")
-ACESTEP_PORT = int(os.getenv("ACESTEP_PORT", "7870"))
-ACESTEP_BASE_URL = f"{ACESTEP_HOST}:{ACESTEP_PORT}"
+# Gradio Client for API calls
+from gradio_client import Client, handle_file
 
-# Checkpoint path (user should configure this)
-ACESTEP_CHECKPOINT = os.getenv("ACESTEP_CHECKPOINT", "ACE-Step/ACE-Step-v1-3.5B")
+# ACE-Step Gradio Configuration
+ACESTEP_URL = os.getenv("ACESTEP_URL", "http://localhost:7870")
 
 # Output directory for generated audio
 OUTPUT_DIR = Path(__file__).parent.parent.parent / "generated_audio"
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+# Gradio client singleton
+_client = None
+
+
+def get_gradio_client() -> Client:
+    """Get or create Gradio client connection"""
+    global _client
+    if _client is None:
+        _client = Client(ACESTEP_URL)
+    return _client
 
 
 # ============================================================================
@@ -57,76 +48,43 @@ def calculate_antigravity_params(antigravity_level: int) -> Dict[str, Any]:
     """
     Convert Antigravity slider (0-100) to ACE-Step generation parameters.
     
-    The Antigravity Engine controls how "experimental" the generation becomes:
-    - 0-20: Safe/Traditional - Stays close to genre conventions
-    - 20-50: Balanced - Some creative freedom
-    - 50-80: Creative - More unexpected elements
-    - 80-100: Experimental/Wild - Maximum creative chaos
-    
-    Mapped ACE-Step parameters:
-    - guidance_scale: 3.0-15.0 (higher = more adherence to prompt)
-    - infer_step: 60-150 (more steps = higher quality)
-    - omega_scale: 5.0-15.0 (affects generation variance)
-    - cfg_type: "apg" (default) or "cfg" for experimental
+    - 0-20: Tradicional - Sonido auténtico y fiel al género
+    - 20-50: Balanceado - Equilibrio entre tradición e innovación
+    - 50-80: Creativo - Explorando nuevos territorios
+    - 80-100: Experimental - ¡Rompiendo todas las reglas!
     """
     level = max(0, min(100, antigravity_level))
     
-    # Guidance scale mapping (inverted for creativity)
-    # Low antigravity = high guidance (safe), High antigravity = varied guidance
+    # Map to ACE-Step parameters
     if level < 20:
-        guidance_scale = 7.0  # Very stable
+        guidance_scale = 7.0
+        infer_step = 27  # Fast, consistent
         omega_scale = 5.0
-        infer_step = 60
-        cfg_type = "apg"
     elif level < 50:
-        guidance_scale = 5.0 + (level - 20) / 30 * 3.0  # 5.0 - 8.0
-        omega_scale = 5.0 + (level - 20) / 30 * 5.0  # 5.0 - 10.0
-        infer_step = 80
-        cfg_type = "apg"
+        guidance_scale = 5.0 + (level - 20) / 30 * 3.0
+        infer_step = 40
+        omega_scale = 7.0
     elif level < 80:
-        guidance_scale = 8.0 + (level - 50) / 30 * 4.0  # 8.0 - 12.0
-        omega_scale = 10.0 + (level - 50) / 30 * 3.0  # 10.0 - 13.0
-        infer_step = 100
-        cfg_type = "apg"
+        guidance_scale = 8.0 + (level - 50) / 30 * 4.0
+        infer_step = 60
+        omega_scale = 10.0
     else:
-        guidance_scale = 12.0 + (level - 80) / 20 * 3.0  # 12.0 - 15.0
-        omega_scale = 13.0 + (level - 80) / 20 * 2.0  # 13.0 - 15.0
-        infer_step = 150  # Maximum quality for experimental
-        cfg_type = "cfg" if level > 90 else "apg"  # CFG for ultra-experimental
-    
-    # Guidance interval (affects temporal consistency)
-    guidance_interval = 0.5 - (level / 100) * 0.3  # 0.5 to 0.2
-    guidance_interval_decay = 0.0
-    min_guidance_scale = 3.0
-    
-    # ERG settings (Enhanced Representation Guidance)
-    use_erg = level < 80  # Disable ERG for very experimental
-    
-    # OSS steps (Optimal Seed Search)
-    oss_steps = [60, 80, 100] if level < 50 else []
+        guidance_scale = 12.0 + (level - 80) / 20 * 3.0
+        infer_step = 100
+        omega_scale = 13.0
     
     return {
         "guidance_scale": round(guidance_scale, 2),
-        "infer_step": infer_step,
+        "infer_step": int(infer_step),
         "omega_scale": round(omega_scale, 2),
-        "cfg_type": cfg_type,
         "scheduler_type": "euler",
-        "guidance_interval": round(guidance_interval, 2),
-        "guidance_interval_decay": guidance_interval_decay,
-        "min_guidance_scale": min_guidance_scale,
-        "use_erg_tag": use_erg,
-        "use_erg_lyric": use_erg,
-        "use_erg_diffusion": use_erg,
-        "oss_steps": oss_steps,
-        "guidance_scale_text": 0.0,
-        "guidance_scale_lyric": 0.0,
+        "cfg_type": "apg",
         "antigravity_level": level,
         "mode": get_antigravity_mode_name(level)
     }
 
 
 def get_antigravity_mode_name(level: int) -> str:
-    """Get human-readable name for antigravity level"""
     if level < 20:
         return "Tradicional"
     elif level < 50:
@@ -138,396 +96,201 @@ def get_antigravity_mode_name(level: int) -> str:
 
 
 # ============================================================================
-# ACE-STEP API CLIENT
+# HEALTH CHECK
 # ============================================================================
 
-async def check_acestep_health() -> Dict:
-    """Check if ACE-Step server is running and healthy"""
+def check_acestep_health() -> Dict:
+    """Check if ACE-Step Gradio server is running"""
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{ACESTEP_BASE_URL}/health", timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return {
-                        "connected": True,
-                        "status": data.get("status", "healthy"),
-                        "url": ACESTEP_BASE_URL,
-                        "checkpoint": ACESTEP_CHECKPOINT,
-                        "version": "1.5"
-                    }
+        client = get_gradio_client()
+        # Try to get API info
+        return {
+            "connected": True,
+            "status": "healthy",
+            "url": ACESTEP_URL,
+            "message": "ACE-Step Gradio server connected"
+        }
     except Exception as e:
-        pass
-    
-    return {
-        "connected": False,
-        "status": "offline",
-        "url": ACESTEP_BASE_URL,
-        "error": f"ACE-Step server not responding. Start with: python infer-api.py"
-    }
+        return {
+            "connected": False,
+            "status": "offline",
+            "url": ACESTEP_URL,
+            "error": str(e),
+            "message": "Run: acestep --bf16 false --port 7870"
+        }
 
 
-def check_acestep_health_sync() -> Dict:
-    """Synchronous version of health check"""
-    try:
-        resp = requests.get(f"{ACESTEP_BASE_URL}/health", timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            return {
-                "connected": True,
-                "status": data.get("status", "healthy"),
-                "url": ACESTEP_BASE_URL,
-                "checkpoint": ACESTEP_CHECKPOINT
-            }
-    except Exception as e:
-        pass
-    
-    return {
-        "connected": False,
-        "status": "offline", 
-        "url": ACESTEP_BASE_URL,
-        "error": "ACE-Step server not responding. Start with: python infer-api.py"
-    }
+# ============================================================================
+# MUSIC GENERATION
+# ============================================================================
 
-
-async def generate_music(
+def generate_music(
     prompt: str,
     lyrics: str = "",
-    genre: str = "bachata",
-    bpm: int = 120,
-    key: str = "Am",
-    duration: int = 120,  # seconds
+    duration: float = 60.0,
     antigravity: int = 50,
-    user_id: str = None,
     seed: int = -1
 ) -> Dict:
     """
-    Generate music using ACE-Step API with Antigravity Engine.
+    Generate music using ACE-Step via Gradio Client.
     
     Args:
-        prompt: Text description of the music
-        lyrics: Optional lyrics for the song (with [Verse], [Chorus] tags)
-        genre: Music genre (bachata, bolero, merengue, salsa, etc.)
-        bpm: Tempo in beats per minute
-        key: Musical key (Am, C, G, etc.)
-        duration: Duration in seconds (max 240 = 4 minutes)
+        prompt: Style tags (e.g., "bachata, romantic, guitar, bongos")
+        lyrics: Lyrics with [Verse], [Chorus] tags
+        duration: Duration in seconds (max 240)
         antigravity: Creativity level (0-100)
-        user_id: User ID for tracking
         seed: Random seed (-1 for random)
     
     Returns:
-        Dict with job_id, status, audio_path, and generation details
+        Dict with audio path and generation details
     """
     # Calculate Antigravity parameters
     params = calculate_antigravity_params(antigravity)
     
-    # Build the enhanced prompt with DGB style
-    enhanced_prompt = build_dgb_prompt(prompt, genre, bpm, key)
-    
-    # Format lyrics with proper structure
-    formatted_lyrics = format_lyrics(lyrics) if lyrics else "[instrumental]"
-    
     # Create job ID
-    job_id = f"dgb_{secrets.token_hex(12)}"
+    job_id = f"dgb_{secrets.token_hex(8)}"
     
     # Generate seed if random
     actual_seed = seed if seed > 0 else random.randint(1, 999999)
     
-    # Prepare ACE-Step API request (matching infer-api.py schema)
-    acestep_payload = {
-        "checkpoint_path": ACESTEP_CHECKPOINT,
-        "bf16": True,
-        "torch_compile": False,
-        "device_id": 0,
-        "output_path": str(OUTPUT_DIR / f"{job_id}.wav"),
-        "audio_duration": float(min(duration, 240)),  # Max 4 minutes
-        "prompt": enhanced_prompt,
-        "lyrics": formatted_lyrics,
-        "infer_step": params["infer_step"],
-        "guidance_scale": params["guidance_scale"],
-        "scheduler_type": params["scheduler_type"],
-        "cfg_type": params["cfg_type"],
-        "omega_scale": params["omega_scale"],
-        "actual_seeds": [actual_seed],
-        "guidance_interval": params["guidance_interval"],
-        "guidance_interval_decay": params["guidance_interval_decay"],
-        "min_guidance_scale": params["min_guidance_scale"],
-        "use_erg_tag": params["use_erg_tag"],
-        "use_erg_lyric": params["use_erg_lyric"],
-        "use_erg_diffusion": params["use_erg_diffusion"],
-        "oss_steps": params["oss_steps"],
-        "guidance_scale_text": params["guidance_scale_text"],
-        "guidance_scale_lyric": params["guidance_scale_lyric"]
-    }
-    
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{ACESTEP_BASE_URL}/generate",
-                json=acestep_payload,
-                timeout=aiohttp.ClientTimeout(total=600)  # 10 min timeout
-            ) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    
-                    audio_path = result.get("output_path")
-                    
-                    return {
-                        "success": True,
-                        "job_id": job_id,
-                        "status": "completed",
-                        "audio_path": audio_path,
-                        "audio_url": f"/audio/{job_id}.wav",
-                        "antigravity_params": params,
-                        "prompt_used": enhanced_prompt,
-                        "lyrics_used": formatted_lyrics,
-                        "duration": duration,
-                        "seed": actual_seed,
-                        "acestep_response": result
-                    }
-                else:
-                    error_text = await resp.text()
-                    return {
-                        "success": False,
-                        "job_id": job_id,
-                        "status": "failed",
-                        "error": f"ACE-Step error: {error_text}"
-                    }
-                    
-    except asyncio.TimeoutError:
+        client = get_gradio_client()
+        
+        # Call ACE-Step Text2Music endpoint
+        # Based on Gradio interface: (tags, lyrics, duration, ..., guidance_scale, infer_step, ...)
+        result = client.predict(
+            # Basic inputs
+            prompt,                          # Tags/prompt
+            lyrics if lyrics else "[instrumental]",  # Lyrics
+            duration,                        # Audio duration
+            # Generation parameters
+            params["infer_step"],           # Inference steps
+            params["guidance_scale"],       # Guidance scale
+            params["scheduler_type"],       # Scheduler type
+            params["cfg_type"],             # CFG type
+            params["omega_scale"],          # Omega scale
+            str(actual_seed),               # Manual seeds
+            0.5,                            # guidance_interval
+            0.0,                            # guidance_interval_decay
+            3.0,                            # min_guidance_scale
+            True,                           # use_erg_tag
+            True,                           # use_erg_lyric
+            True,                           # use_erg_diffusion
+            "60, 80",                       # oss_steps
+            0.0,                            # guidance_scale_text
+            0.0,                            # guidance_scale_lyric
+            fn_index=0                      # Text2Music function
+        )
+        
+        # Result is typically a tuple with (audio_path, ...)
+        audio_path = result if isinstance(result, str) else result[0]
+        
+        # Copy to our output directory
+        if audio_path and os.path.exists(audio_path):
+            output_path = OUTPUT_DIR / f"{job_id}.wav"
+            shutil.copy(audio_path, output_path)
+            audio_path = str(output_path)
+        
         return {
-            "success": False,
+            "success": True,
             "job_id": job_id,
-            "status": "timeout",
-            "error": "Generation took too long (>10 min)"
+            "status": "completed",
+            "audio_path": audio_path,
+            "audio_url": f"/api/audio/{job_id}.wav",
+            "antigravity_params": params,
+            "prompt_used": prompt,
+            "duration": duration,
+            "seed": actual_seed
         }
-    except aiohttp.ClientConnectorError:
-        return {
-            "success": False,
-            "job_id": job_id,
-            "status": "connection_error",
-            "error": f"Cannot connect to ACE-Step at {ACESTEP_BASE_URL}. Is the server running?"
-        }
+        
     except Exception as e:
         return {
             "success": False,
             "job_id": job_id,
             "status": "error",
-            "error": str(e)
+            "error": str(e),
+            "message": "Check if ACE-Step is running on port 7870"
         }
 
 
-def generate_music_sync(
+async def generate_music_async(
     prompt: str,
     lyrics: str = "",
-    genre: str = "bachata",
-    bpm: int = 120,
-    key: str = "Am",
-    duration: int = 120,
+    duration: float = 60.0,
     antigravity: int = 50,
-    user_id: str = None
+    seed: int = -1
 ) -> Dict:
-    """Synchronous wrapper for generate_music"""
-    return asyncio.run(generate_music(
+    """Async wrapper for generate_music"""
+    return await asyncio.to_thread(
+        generate_music,
         prompt=prompt,
         lyrics=lyrics,
-        genre=genre,
-        bpm=bpm,
-        key=key,
         duration=duration,
         antigravity=antigravity,
-        user_id=user_id
-    ))
-
-
-def build_dgb_prompt(prompt: str, genre: str, bpm: int, key: str) -> str:
-    """
-    Build an enhanced prompt with DGB tropical music style hints.
-    ACE-Step works best with detailed style descriptions.
-    """
-    # Genre-specific style hints (matching ACE-Step's training data)
-    genre_hints = {
-        "bachata": "latin bachata, romantic guitar arpeggios, bongos, güira, sensual bassline, Dominican style, smooth male/female vocals",
-        "bolero": "latin bolero, slow romantic ballad, expressive acoustic guitar, emotional strings, Cuban influence, passionate vocals",
-        "merengue": "Dominican merengue, fast accordion, energetic tambora drum, syncopated rhythms, party atmosphere, 160-180 bpm",
-        "salsa": "Cuban salsa, bright brass section, clave rhythm, congas, piano montuno, son influence, energetic horns",
-        "cumbia": "Colombian cumbia, accordion melody, guacharaca percussion, tropical feel, danceable groove",
-        "reggaeton": "reggaeton, dembow rhythm, 808 bass, urban Latin style, perreo beat, modern production",
-        "son": "Cuban son montuno, tres guitar, bongos, traditional Caribbean roots, Afro-Cuban rhythms",
-        "tropical": "tropical Latin music, Caribbean influence, warm production, danceable rhythms"
-    }
-    
-    style_hint = genre_hints.get(genre.lower(), genre_hints["tropical"])
-    
-    # Build the enhanced prompt matching ACE-Step format
-    enhanced = f"{style_hint}, {bpm} bpm, key of {key}"
-    
-    # Add user's custom description
-    if prompt:
-        enhanced = f"{prompt}, {enhanced}"
-    
-    return enhanced
-
-
-def format_lyrics(lyrics: str) -> str:
-    """
-    Format lyrics for ACE-Step.
-    ACE-Step expects lyrics with structure tags like [Verse], [Chorus], [Bridge]
-    """
-    if not lyrics or lyrics.strip() == "":
-        return "[instrumental]"
-    
-    # If lyrics already have structure tags, return as-is
-    if "[" in lyrics and "]" in lyrics:
-        return lyrics
-    
-    # Otherwise, wrap in a generic verse structure
-    lines = lyrics.strip().split("\n")
-    formatted = "[Verse 1]\n"
-    
-    verse_count = 1
-    line_count = 0
-    
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        
-        formatted += line + "\n"
-        line_count += 1
-        
-        # Add new verse tag every 4 lines
-        if line_count >= 4 and line != lines[-1].strip():
-            verse_count += 1
-            if verse_count % 2 == 0:
-                formatted += "\n[Chorus]\n"
-            else:
-                formatted += f"\n[Verse {(verse_count + 1) // 2}]\n"
-            line_count = 0
-    
-    return formatted.strip()
-
-
-async def get_generation_status(job_id: str) -> Dict:
-    """Check status of generation by looking for output file"""
-    audio_path = OUTPUT_DIR / f"{job_id}.wav"
-    
-    if audio_path.exists():
-        return {
-            "job_id": job_id,
-            "status": "completed",
-            "audio_path": str(audio_path),
-            "audio_url": f"/audio/{job_id}.wav"
-        }
-    
-    return {
-        "job_id": job_id,
-        "status": "processing"
-    }
+        seed=seed
+    )
 
 
 # ============================================================================
-# ADVANCED FEATURES (Variations, Repaint, Edit)
-# ============================================================================
-
-async def generate_variations(
-    prompt: str,
-    genre: str,
-    count: int = 3,
-    antigravity_levels: List[int] = None,
-    base_seed: int = -1
-) -> List[Dict]:
-    """
-    Generate multiple variations of a song with different antigravity levels.
-    Great for A/B testing different creative intensities.
-    """
-    if antigravity_levels is None:
-        antigravity_levels = [25, 50, 75]  # Traditional, Balanced, Creative
-    
-    results = []
-    base_seed = base_seed if base_seed > 0 else random.randint(1, 999999)
-    
-    for i, level in enumerate(antigravity_levels[:count]):
-        result = await generate_music(
-            prompt=prompt,
-            genre=genre,
-            antigravity=level,
-            seed=base_seed + i  # Related but different seeds
-        )
-        result["variation"] = i + 1
-        result["variation_seed"] = base_seed + i
-        results.append(result)
-    
-    return results
-
-
-# ============================================================================
-# DGB PRESETS
+# DGB TROPICAL MUSIC PRESETS
 # ============================================================================
 
 DGB_PRESETS = {
     "bachata_romantica": {
-        "genre": "bachata",
+        "prompt": "bachata, romantic, smooth guitar, bongos, güira, Dominican style, sensual",
         "bpm": 130,
         "key": "Am",
         "antigravity": 30,
-        "description": "Bachata romántica tradicional para enamorar",
-        "prompt_hint": "romantic slow bachata, heartfelt lyrics, smooth guitar"
+        "description": "Bachata romántica tradicional para enamorar"
     },
     "bachata_moderna": {
-        "genre": "bachata",
+        "prompt": "bachata, modern, urban influences, catchy melody, guitar, drums",
         "bpm": 140,
         "key": "Em",
         "antigravity": 60,
-        "description": "Bachata moderna con toques urbanos",
-        "prompt_hint": "modern bachata, urban influences, catchy melody"
+        "description": "Bachata moderna con toques urbanos"
     },
     "bolero_clasico": {
-        "genre": "bolero",
+        "prompt": "bolero, slow romantic ballad, expressive guitar, emotional strings, Cuban",
         "bpm": 80,
         "key": "Dm",
         "antigravity": 20,
-        "description": "Bolero clásico para noches de luna",
-        "prompt_hint": "classic Cuban bolero, romantic, expressive vocals"
+        "description": "Bolero clásico para noches de luna"
     },
     "merengue_fiesta": {
-        "genre": "merengue",
+        "prompt": "Dominican merengue, fast accordion, tambora drum, party atmosphere",
         "bpm": 160,
         "key": "C",
         "antigravity": 50,
-        "description": "Merengue para bailar hasta el amanecer",
-        "prompt_hint": "energetic merengue, party atmosphere, fast tempo"
+        "description": "Merengue para bailar hasta el amanecer"
     },
     "salsa_dura": {
-        "genre": "salsa",
+        "prompt": "Cuban salsa, son, bright brass, clave rhythm, congas, piano montuno",
         "bpm": 180,
         "key": "G",
         "antigravity": 45,
-        "description": "Salsa brava con descarga",
-        "prompt_hint": "hard salsa, brass section, Cuban son influences"
-    },
-    "tropical_fusion": {
-        "genre": "tropical",
-        "bpm": 125,
-        "key": "Gm",
-        "antigravity": 85,
-        "description": "Fusión experimental tropical",
-        "prompt_hint": "experimental fusion, mixing tropical with electronic"
+        "description": "Salsa brava con descarga"
     },
     "cumbia_colombiana": {
-        "genre": "cumbia",
+        "prompt": "Colombian cumbia, accordion melody, guacharaca, tropical, festive",
         "bpm": 95,
         "key": "D",
         "antigravity": 35,
-        "description": "Cumbia colombiana tradicional",
-        "prompt_hint": "Colombian cumbia, accordion, guacharaca, festive"
+        "description": "Cumbia colombiana tradicional"
     },
     "reggaeton_caliente": {
-        "genre": "reggaeton",
+        "prompt": "reggaeton, dembow rhythm, 808 bass, urban Latin, perreo beat",
         "bpm": 92,
         "key": "Fm",
         "antigravity": 55,
-        "description": "Reggaeton urbano para el perreo",
-        "prompt_hint": "reggaeton, dembow beat, 808 bass, urban latin"
+        "description": "Reggaeton urbano para el perreo"
+    },
+    "tropical_fusion": {
+        "prompt": "tropical fusion, experimental, Latin electronic, Caribbean, innovative",
+        "bpm": 125,
+        "key": "Gm",
+        "antigravity": 85,
+        "description": "Fusión experimental tropical"
     }
 }
 
@@ -540,17 +303,67 @@ def get_preset(preset_name: str) -> Dict:
 def list_presets() -> Dict:
     """List all available DGB presets"""
     return {
-        "presets": [
-            {"id": k, **v} for k, v in DGB_PRESETS.items()
-        ],
+        "presets": [{"id": k, **v} for k, v in DGB_PRESETS.items()],
         "count": len(DGB_PRESETS)
     }
 
 
-def get_supported_genres() -> List[str]:
-    """Get list of supported genres based on ACE-Step training data"""
-    return [
-        "bachata", "bolero", "merengue", "salsa", "cumbia",
-        "reggaeton", "son", "tropical", "latin pop", "latin rock",
-        "flamenco", "tango", "bossa nova", "samba"
-    ]
+def generate_from_preset(
+    preset_name: str,
+    lyrics: str = "",
+    duration: float = 60.0,
+    custom_prompt: str = ""
+) -> Dict:
+    """Generate music using a DGB preset"""
+    preset = get_preset(preset_name)
+    
+    # Combine preset prompt with custom
+    full_prompt = preset["prompt"]
+    if custom_prompt:
+        full_prompt = f"{custom_prompt}, {full_prompt}"
+    
+    return generate_music(
+        prompt=full_prompt,
+        lyrics=lyrics,
+        duration=duration,
+        antigravity=preset["antigravity"]
+    )
+
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+def format_lyrics(lyrics: str) -> str:
+    """Format lyrics for ACE-Step"""
+    if not lyrics or lyrics.strip() == "":
+        return "[instrumental]"
+    
+    if "[" in lyrics and "]" in lyrics:
+        return lyrics
+    
+    # Wrap in verse structure
+    lines = lyrics.strip().split("\n")
+    formatted = "[Verse 1]\n" + "\n".join(lines)
+    return formatted
+
+
+def get_generated_audio(job_id: str) -> Optional[str]:
+    """Get path to generated audio file"""
+    audio_path = OUTPUT_DIR / f"{job_id}.wav"
+    if audio_path.exists():
+        return str(audio_path)
+    return None
+
+
+def list_generated_audio(limit: int = 20) -> List[Dict]:
+    """List recent generated audio files"""
+    audio_files = []
+    for f in sorted(OUTPUT_DIR.glob("*.wav"), key=os.path.getmtime, reverse=True)[:limit]:
+        audio_files.append({
+            "job_id": f.stem,
+            "path": str(f),
+            "size_mb": round(f.stat().st_size / (1024 * 1024), 2),
+            "created_at": datetime.fromtimestamp(f.stat().st_mtime).isoformat()
+        })
+    return audio_files
