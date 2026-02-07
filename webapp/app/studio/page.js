@@ -6,20 +6,48 @@ import '../globals.css';
 
 const API_BASE = 'http://localhost:8000/api';
 
+/**
+ * DGB AUDIO STUDIO
+ * ================
+ * Integrated ACE-Step workflows:
+ * - Text2Music: Generate from prompts and lyrics
+ * - Retake: Variations with different creative levels
+ * - Repaint: Re-generate specific sections
+ * - Edit: Modify lyrics keeping melody
+ * - Extend: Add music before/after
+ */
+
 export default function StudioPage() {
+    const router = useRouter();
     const [user, setUser] = useState(null);
-    const [tracks, setTracks] = useState([
-        { id: 1, name: 'Track 1', type: 'vocal', muted: false, solo: false, volume: 80, pan: 0 },
-        { id: 2, name: 'Guitarra', type: 'instrument', muted: false, solo: false, volume: 70, pan: -20 },
-        { id: 3, name: 'Bajo', type: 'instrument', muted: false, solo: false, volume: 75, pan: 0 },
-        { id: 4, name: 'Bongos', type: 'drums', muted: false, solo: false, volume: 65, pan: 10 }
-    ]);
+    const [activeTab, setActiveTab] = useState('create');
+
+    // ACE-Step Health
+    const [aceStepConnected, setAceStepConnected] = useState(false);
+
+    // Generation State
+    const [isGenerating, setIsGenerating] = useState(false);
+    const [generationProgress, setGenerationProgress] = useState(0);
+    const [generatedAudio, setGeneratedAudio] = useState(null);
+    const audioRef = useRef(null);
+
+    // Create Tab State
+    const [prompt, setPrompt] = useState('');
+    const [lyrics, setLyrics] = useState('');
+    const [duration, setDuration] = useState(60);
+    const [antigravity, setAntigravity] = useState(50);
+    const [selectedPreset, setSelectedPreset] = useState('');
+    const [presets, setPresets] = useState([]);
+
+    // Playback State
     const [isPlaying, setIsPlaying] = useState(false);
     const [currentTime, setCurrentTime] = useState(0);
-    const [bpm, setBpm] = useState(120);
-    const [projectName, setProjectName] = useState('Mi Bachata Romántica');
-    const router = useRouter();
+    const [totalDuration, setTotalDuration] = useState(0);
 
+    // History
+    const [generations, setGenerations] = useState([]);
+
+    // Auth check and initial data load
     useEffect(() => {
         const token = localStorage.getItem('dgb_token');
         if (!token) {
@@ -28,30 +56,104 @@ export default function StudioPage() {
         }
         const storedUser = localStorage.getItem('dgb_user');
         if (storedUser) setUser(JSON.parse(storedUser));
+
+        // Check ACE-Step connection
+        checkAceStepHealth();
+        loadPresets();
     }, [router]);
 
-    const toggleMute = (id) => {
-        setTracks(prev => prev.map(t =>
-            t.id === id ? { ...t, muted: !t.muted } : t
-        ));
+    const checkAceStepHealth = async () => {
+        try {
+            const res = await fetch(`${API_BASE}/acestep/health`);
+            const data = await res.json();
+            setAceStepConnected(data.connected);
+        } catch {
+            setAceStepConnected(false);
+        }
     };
 
-    const toggleSolo = (id) => {
-        setTracks(prev => prev.map(t =>
-            t.id === id ? { ...t, solo: !t.solo } : t
-        ));
+    const loadPresets = async () => {
+        try {
+            const res = await fetch(`${API_BASE}/acestep/presets`);
+            const data = await res.json();
+            setPresets(data.presets || []);
+        } catch (e) {
+            console.error('Failed to load presets:', e);
+        }
     };
 
-    const setVolume = (id, volume) => {
-        setTracks(prev => prev.map(t =>
-            t.id === id ? { ...t, volume } : t
-        ));
+    // Generate music
+    const handleGenerate = async () => {
+        const token = localStorage.getItem('dgb_token');
+        if (!token) return;
+
+        setIsGenerating(true);
+        setGenerationProgress(0);
+
+        // Simulate progress
+        const progressInterval = setInterval(() => {
+            setGenerationProgress(prev => Math.min(prev + 5, 95));
+        }, 1000);
+
+        try {
+            const res = await fetch(`${API_BASE}/generate/music?token=${token}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    prompt: selectedPreset ? presets.find(p => p.id === selectedPreset)?.prompt + ', ' + prompt : prompt,
+                    lyrics,
+                    duration,
+                    antigravity,
+                    genre: selectedPreset || 'tropical',
+                    bpm: 120,
+                    key: 'Am'
+                })
+            });
+
+            const data = await res.json();
+            clearInterval(progressInterval);
+            setGenerationProgress(100);
+
+            if (data.success) {
+                setGeneratedAudio(data);
+                setGenerations(prev => [data, ...prev.slice(0, 9)]);
+            } else {
+                alert(data.error || 'Generation failed');
+            }
+        } catch (e) {
+            console.error('Generation error:', e);
+            alert('Error connecting to server');
+        } finally {
+            clearInterval(progressInterval);
+            setIsGenerating(false);
+        }
     };
 
-    const setPan = (id, pan) => {
-        setTracks(prev => prev.map(t =>
-            t.id === id ? { ...t, pan } : t
-        ));
+    // Retake (variation) generation
+    const handleRetake = async () => {
+        if (!generatedAudio) return;
+        // Re-generate with same prompt but different seed
+        setAntigravity(prev => Math.min(prev + 10, 100));
+        await handleGenerate();
+    };
+
+    // Audio playback controls
+    const togglePlayback = () => {
+        if (audioRef.current) {
+            if (isPlaying) {
+                audioRef.current.pause();
+            } else {
+                audioRef.current.play();
+            }
+            setIsPlaying(!isPlaying);
+        }
+    };
+
+    const handleTimeUpdate = () => {
+        if (audioRef.current) {
+            setCurrentTime(audioRef.current.currentTime);
+            setTotalDuration(audioRef.current.duration || 0);
+        }
     };
 
     const formatTime = (seconds) => {
@@ -60,420 +162,551 @@ export default function StudioPage() {
         return `${mins}:${secs.toString().padStart(2, '0')}`;
     };
 
-    return (
-        <div style={{
+    // Antigravity mode label
+    const getAntigravityMode = () => {
+        if (antigravity < 20) return { name: 'Tradicional', emoji: '🎸', color: '#4ade80' };
+        if (antigravity < 50) return { name: 'Balanceado', emoji: '🎹', color: '#60a5fa' };
+        if (antigravity < 80) return { name: 'Creativo', emoji: '🚀', color: '#f472b6' };
+        return { name: 'Experimental', emoji: '🌀', color: '#c084fc' };
+    };
+
+    const antigravityMode = getAntigravityMode();
+
+    // Styles
+    const styles = {
+        container: {
             height: '100vh',
             display: 'flex',
             flexDirection: 'column',
-            background: 'linear-gradient(180deg, #1a1a2e 0%, #0a0a0f 100%)',
+            background: 'linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #0a0a0f 100%)',
             color: 'white',
             overflow: 'hidden'
-        }}>
-            {/* Top Toolbar */}
-            <div style={{
-                padding: '0.75rem 1.5rem',
-                borderBottom: '1px solid rgba(255,255,255,0.1)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                background: 'rgba(0,0,0,0.3)'
-            }}>
+        },
+        header: {
+            padding: '1rem 2rem',
+            borderBottom: '1px solid rgba(255,255,255,0.1)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            background: 'rgba(0,0,0,0.4)',
+            backdropFilter: 'blur(10px)'
+        },
+        logo: {
+            fontSize: '1.5rem',
+            fontWeight: 'bold',
+            background: 'linear-gradient(90deg, #00d4ff, #00ff88)',
+            WebkitBackgroundClip: 'text',
+            WebkitTextFillColor: 'transparent'
+        },
+        statusBadge: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.5rem',
+            padding: '0.5rem 1rem',
+            borderRadius: '20px',
+            fontSize: '0.85rem',
+            background: aceStepConnected ? 'rgba(0,255,136,0.1)' : 'rgba(255,100,100,0.1)',
+            border: aceStepConnected ? '1px solid rgba(0,255,136,0.3)' : '1px solid rgba(255,100,100,0.3)'
+        },
+        mainContent: {
+            flex: 1,
+            display: 'flex',
+            overflow: 'hidden'
+        },
+        sidebar: {
+            width: '280px',
+            background: 'rgba(0,0,0,0.3)',
+            borderRight: '1px solid rgba(255,255,255,0.1)',
+            padding: '1.5rem',
+            overflowY: 'auto'
+        },
+        workArea: {
+            flex: 1,
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden'
+        },
+        tabs: {
+            display: 'flex',
+            gap: '0.5rem',
+            padding: '1rem 2rem',
+            borderBottom: '1px solid rgba(255,255,255,0.1)'
+        },
+        tab: (active) => ({
+            padding: '0.75rem 1.5rem',
+            borderRadius: '8px',
+            background: active ? 'linear-gradient(135deg, #00d4ff20, #00ff8820)' : 'transparent',
+            border: active ? '1px solid rgba(0,212,255,0.3)' : '1px solid rgba(255,255,255,0.1)',
+            cursor: 'pointer',
+            transition: 'all 0.3s',
+            color: active ? '#00d4ff' : 'rgba(255,255,255,0.7)'
+        }),
+        canvas: {
+            flex: 1,
+            padding: '2rem',
+            overflowY: 'auto'
+        },
+        card: {
+            background: 'rgba(255,255,255,0.05)',
+            borderRadius: '16px',
+            border: '1px solid rgba(255,255,255,0.1)',
+            padding: '1.5rem',
+            marginBottom: '1.5rem'
+        },
+        label: {
+            display: 'block',
+            marginBottom: '0.5rem',
+            color: 'rgba(255,255,255,0.7)',
+            fontSize: '0.9rem'
+        },
+        input: {
+            width: '100%',
+            padding: '0.75rem 1rem',
+            borderRadius: '8px',
+            border: '1px solid rgba(255,255,255,0.2)',
+            background: 'rgba(0,0,0,0.3)',
+            color: 'white',
+            fontSize: '1rem',
+            outline: 'none'
+        },
+        textarea: {
+            width: '100%',
+            padding: '1rem',
+            borderRadius: '8px',
+            border: '1px solid rgba(255,255,255,0.2)',
+            background: 'rgba(0,0,0,0.3)',
+            color: 'white',
+            fontSize: '1rem',
+            minHeight: '150px',
+            resize: 'vertical',
+            outline: 'none',
+            fontFamily: 'monospace'
+        },
+        slider: {
+            width: '100%',
+            height: '8px',
+            borderRadius: '4px',
+            appearance: 'none',
+            background: `linear-gradient(90deg, #4ade80 0%, #60a5fa 33%, #f472b6 66%, #c084fc 100%)`,
+            cursor: 'pointer'
+        },
+        primaryButton: {
+            width: '100%',
+            padding: '1rem',
+            borderRadius: '12px',
+            border: 'none',
+            background: 'linear-gradient(135deg, #00d4ff, #00ff88)',
+            color: '#000',
+            fontSize: '1.1rem',
+            fontWeight: 'bold',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '0.5rem',
+            transition: 'transform 0.2s'
+        },
+        presetButton: (selected) => ({
+            padding: '0.75rem 1rem',
+            borderRadius: '8px',
+            border: selected ? '2px solid #00d4ff' : '1px solid rgba(255,255,255,0.2)',
+            background: selected ? 'rgba(0,212,255,0.2)' : 'rgba(255,255,255,0.05)',
+            color: selected ? '#00d4ff' : 'white',
+            cursor: 'pointer',
+            textAlign: 'left',
+            width: '100%',
+            marginBottom: '0.5rem'
+        }),
+        player: {
+            background: 'rgba(0,0,0,0.4)',
+            borderTop: '1px solid rgba(255,255,255,0.1)',
+            padding: '1rem 2rem',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '1.5rem'
+        },
+        playButton: {
+            width: '50px',
+            height: '50px',
+            borderRadius: '50%',
+            border: 'none',
+            background: 'linear-gradient(135deg, #00d4ff, #00ff88)',
+            color: '#000',
+            fontSize: '1.2rem',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center'
+        },
+        progressBar: {
+            flex: 1,
+            height: '6px',
+            borderRadius: '3px',
+            background: 'rgba(255,255,255,0.2)',
+            position: 'relative',
+            cursor: 'pointer'
+        }
+    };
+
+    return (
+        <div style={styles.container}>
+            {/* Header */}
+            <header style={styles.header}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '2rem' }}>
+                    <span style={styles.logo}>🎸 DGB STUDIO</span>
+                    <div style={styles.statusBadge}>
+                        <span style={{
+                            width: '8px', height: '8px', borderRadius: '50%',
+                            background: aceStepConnected ? '#00ff88' : '#ff6464'
+                        }} />
+                        {aceStepConnected ? 'ACE-Step Conectado' : 'ACE-Step Offline'}
+                    </div>
+                </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                    <span style={{ color: 'rgba(255,255,255,0.7)' }}>
+                        Hola, {user?.name || 'Usuario'}
+                    </span>
                     <button
-                        onClick={() => router.push('/create')}
-                        style={{ background: 'none', border: 'none', color: 'white', fontSize: '1.25rem', cursor: 'pointer' }}
+                        onClick={() => router.push('/dashboard')}
+                        style={{ padding: '0.5rem 1rem', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.2)', background: 'transparent', color: 'white', cursor: 'pointer' }}
                     >
-                        ←
-                    </button>
-                    <input
-                        type="text"
-                        value={projectName}
-                        onChange={(e) => setProjectName(e.target.value)}
-                        style={{
-                            background: 'transparent',
-                            border: 'none',
-                            color: 'white',
-                            fontSize: '1.1rem',
-                            fontWeight: 600,
-                            width: '250px'
-                        }}
-                    />
-                </div>
-
-                {/* Transport Controls */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <button style={{
-                        width: '40px',
-                        height: '40px',
-                        borderRadius: '50%',
-                        background: 'rgba(255,255,255,0.1)',
-                        border: 'none',
-                        color: 'white',
-                        cursor: 'pointer',
-                        fontSize: '1rem'
-                    }}>
-                        ⏮
-                    </button>
-                    <button
-                        onClick={() => setIsPlaying(!isPlaying)}
-                        style={{
-                            width: '50px',
-                            height: '50px',
-                            borderRadius: '50%',
-                            background: 'var(--gold)',
-                            border: 'none',
-                            color: 'black',
-                            cursor: 'pointer',
-                            fontSize: '1.25rem',
-                            fontWeight: 700
-                        }}
-                    >
-                        {isPlaying ? '⏸' : '▶'}
-                    </button>
-                    <button style={{
-                        width: '40px',
-                        height: '40px',
-                        borderRadius: '50%',
-                        background: 'rgba(255,255,255,0.1)',
-                        border: 'none',
-                        color: 'white',
-                        cursor: 'pointer',
-                        fontSize: '1rem'
-                    }}>
-                        ⏭
-                    </button>
-                    <button style={{
-                        width: '40px',
-                        height: '40px',
-                        borderRadius: '50%',
-                        background: 'rgba(255,68,68,0.3)',
-                        border: '2px solid #ff4444',
-                        color: '#ff4444',
-                        cursor: 'pointer',
-                        fontSize: '0.9rem'
-                    }}>
-                        ⏺
+                        Dashboard
                     </button>
                 </div>
-
-                {/* Time & BPM */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: '1.5rem' }}>
-                    <div style={{
-                        fontFamily: 'monospace',
-                        fontSize: '1.5rem',
-                        background: 'rgba(0,0,0,0.5)',
-                        padding: '0.5rem 1rem',
-                        borderRadius: '8px'
-                    }}>
-                        {formatTime(currentTime)}
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                        <span style={{ color: 'var(--text-gray)' }}>BPM:</span>
-                        <input
-                            type="number"
-                            value={bpm}
-                            onChange={(e) => setBpm(Number(e.target.value))}
-                            style={{
-                                width: '60px',
-                                background: 'rgba(0,0,0,0.5)',
-                                border: '1px solid rgba(255,255,255,0.2)',
-                                borderRadius: '4px',
-                                color: 'var(--gold)',
-                                padding: '0.5rem',
-                                textAlign: 'center',
-                                fontWeight: 600
-                            }}
-                        />
-                    </div>
-                </div>
-            </div>
+            </header>
 
             {/* Main Content */}
-            <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-                {/* Track Controls */}
-                <div style={{
-                    width: '250px',
-                    background: 'rgba(0,0,0,0.4)',
-                    borderRight: '1px solid rgba(255,255,255,0.1)',
-                    display: 'flex',
-                    flexDirection: 'column'
-                }}>
-                    {/* Add Track Button */}
-                    <button style={{
-                        margin: '1rem',
-                        padding: '0.75rem',
-                        background: 'rgba(255,255,255,0.1)',
-                        border: '1px dashed rgba(255,255,255,0.3)',
-                        borderRadius: '8px',
-                        color: 'white',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: '0.5rem'
-                    }}>
-                        ➕ Añadir Track
-                    </button>
-
-                    {/* Track List */}
-                    {tracks.map(track => (
-                        <div
-                            key={track.id}
-                            style={{
-                                padding: '0.75rem 1rem',
-                                borderBottom: '1px solid rgba(255,255,255,0.1)',
-                                background: 'rgba(255,255,255,0.02)'
-                            }}
+            <div style={styles.mainContent}>
+                {/* Sidebar - Presets */}
+                <aside style={styles.sidebar}>
+                    <h3 style={{ marginBottom: '1rem', fontSize: '1rem', color: 'rgba(255,255,255,0.5)' }}>
+                        🎼 PRESETS DGB
+                    </h3>
+                    {presets.map(preset => (
+                        <button
+                            key={preset.id}
+                            onClick={() => setSelectedPreset(preset.id === selectedPreset ? '' : preset.id)}
+                            style={styles.presetButton(preset.id === selectedPreset)}
                         >
-                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                                <span style={{ fontWeight: 500 }}>{track.name}</span>
-                                <div style={{ display: 'flex', gap: '0.25rem' }}>
-                                    <button
-                                        onClick={() => toggleMute(track.id)}
-                                        style={{
-                                            width: '24px',
-                                            height: '24px',
-                                            borderRadius: '4px',
-                                            background: track.muted ? '#ff4444' : 'rgba(255,255,255,0.1)',
-                                            border: 'none',
-                                            color: 'white',
-                                            fontSize: '0.7rem',
-                                            cursor: 'pointer'
-                                        }}
-                                    >
-                                        M
-                                    </button>
-                                    <button
-                                        onClick={() => toggleSolo(track.id)}
-                                        style={{
-                                            width: '24px',
-                                            height: '24px',
-                                            borderRadius: '4px',
-                                            background: track.solo ? 'var(--gold)' : 'rgba(255,255,255,0.1)',
-                                            border: 'none',
-                                            color: track.solo ? 'black' : 'white',
-                                            fontSize: '0.7rem',
-                                            cursor: 'pointer'
-                                        }}
-                                    >
-                                        S
-                                    </button>
+                            <div style={{ fontWeight: 'bold', marginBottom: '0.25rem' }}>
+                                {preset.id.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                            </div>
+                            <div style={{ fontSize: '0.75rem', opacity: 0.7 }}>
+                                {preset.bpm} BPM • {preset.key}
+                            </div>
+                        </button>
+                    ))}
+
+                    <hr style={{ border: 'none', borderTop: '1px solid rgba(255,255,255,0.1)', margin: '1.5rem 0' }} />
+
+                    <h3 style={{ marginBottom: '1rem', fontSize: '1rem', color: 'rgba(255,255,255,0.5)' }}>
+                        📜 HISTORIAL
+                    </h3>
+                    {generations.length === 0 ? (
+                        <p style={{ fontSize: '0.85rem', color: 'rgba(255,255,255,0.5)' }}>
+                            Sin generaciones aún
+                        </p>
+                    ) : (
+                        generations.map((gen, i) => (
+                            <div
+                                key={gen.job_id}
+                                onClick={() => setGeneratedAudio(gen)}
+                                style={{
+                                    padding: '0.75rem',
+                                    borderRadius: '8px',
+                                    background: generatedAudio?.job_id === gen.job_id ? 'rgba(0,212,255,0.2)' : 'rgba(255,255,255,0.05)',
+                                    marginBottom: '0.5rem',
+                                    cursor: 'pointer',
+                                    fontSize: '0.85rem'
+                                }}
+                            >
+                                <div>🎵 {gen.job_id.slice(0, 12)}...</div>
+                                <div style={{ fontSize: '0.75rem', opacity: 0.6 }}>
+                                    Antigravity: {gen.antigravity_params?.antigravity_level || 50}
                                 </div>
                             </div>
-                            {/* Volume Slider */}
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                                <span style={{ fontSize: '0.75rem', color: 'var(--text-gray)', width: '25px' }}>
-                                    {track.volume}%
-                                </span>
-                                <input
-                                    type="range"
-                                    min="0"
-                                    max="100"
-                                    value={track.volume}
-                                    onChange={(e) => setVolume(track.id, Number(e.target.value))}
-                                    style={{ flex: 1, height: '4px' }}
-                                />
-                            </div>
-                            {/* Pan Slider */}
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.25rem' }}>
-                                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>L</span>
-                                <input
-                                    type="range"
-                                    min="-50"
-                                    max="50"
-                                    value={track.pan}
-                                    onChange={(e) => setPan(track.id, Number(e.target.value))}
-                                    style={{ flex: 1, height: '3px' }}
-                                />
-                                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>R</span>
-                            </div>
-                        </div>
-                    ))}
-                </div>
+                        ))
+                    )}
+                </aside>
 
-                {/* Timeline */}
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-                    {/* Time Ruler */}
-                    <div style={{
-                        height: '30px',
-                        background: 'rgba(0,0,0,0.3)',
-                        borderBottom: '1px solid rgba(255,255,255,0.1)',
-                        display: 'flex',
-                        alignItems: 'flex-end',
-                        paddingLeft: '10px'
-                    }}>
-                        {[1, 2, 3, 4, 5, 6, 7, 8].map(bar => (
-                            <div
-                                key={bar}
-                                style={{
-                                    width: '100px',
-                                    borderLeft: '1px solid rgba(255,255,255,0.3)',
-                                    paddingLeft: '4px',
-                                    fontSize: '0.7rem',
-                                    color: 'var(--text-gray)'
-                                }}
-                            >
-                                {bar}
-                            </div>
-                        ))}
-                    </div>
+                {/* Work Area */}
+                <main style={styles.workArea}>
+                    {/* Tabs */}
+                    <nav style={styles.tabs}>
+                        <button style={styles.tab(activeTab === 'create')} onClick={() => setActiveTab('create')}>
+                            ✨ Crear
+                        </button>
+                        <button style={styles.tab(activeTab === 'retake')} onClick={() => setActiveTab('retake')}>
+                            🔄 Variaciones
+                        </button>
+                        <button style={styles.tab(activeTab === 'repaint')} onClick={() => setActiveTab('repaint')}>
+                            🎨 Repintar
+                        </button>
+                        <button style={styles.tab(activeTab === 'edit')} onClick={() => setActiveTab('edit')}>
+                            ✏️ Editar
+                        </button>
+                        <button style={styles.tab(activeTab === 'extend')} onClick={() => setActiveTab('extend')}>
+                            ➕ Extender
+                        </button>
+                    </nav>
 
-                    {/* Track Lanes */}
-                    <div style={{ flex: 1, overflowY: 'auto' }}>
-                        {tracks.map(track => (
-                            <div
-                                key={track.id}
-                                style={{
-                                    height: '80px',
-                                    borderBottom: '1px solid rgba(255,255,255,0.1)',
-                                    background: track.muted
-                                        ? 'rgba(255,0,0,0.05)'
-                                        : track.solo
-                                            ? 'rgba(212, 175, 55, 0.1)'
-                                            : 'transparent',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    padding: '0.5rem',
-                                    position: 'relative'
-                                }}
-                            >
-                                {/* Waveform placeholder */}
-                                <div style={{
-                                    height: '60px',
-                                    width: '400px',
-                                    marginLeft: '50px',
-                                    background: `linear-gradient(90deg, 
-                                        ${track.type === 'vocal' ? 'var(--electric-blue)' :
-                                            track.type === 'drums' ? 'var(--gold)' : '#4caf50'} 0%, 
-                                        transparent 100%)`,
-                                    borderRadius: '4px',
-                                    opacity: track.muted ? 0.3 : 0.8,
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center'
-                                }}>
-                                    <div style={{
-                                        width: '100%',
-                                        height: '40px',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        justifyContent: 'space-around'
-                                    }}>
-                                        {/* Fake waveform bars - using seeded values to avoid hydration mismatch */}
-                                        {Array.from({ length: 50 }).map((_, i) => {
-                                            // Seeded pseudo-random based on track id and bar index
-                                            const seed = (track.id * 1000 + i * 7) % 100;
-                                            return (
-                                                <div
-                                                    key={i}
-                                                    style={{
-                                                        width: '3px',
-                                                        height: `${seed}%`,
-                                                        background: 'rgba(255,255,255,0.5)',
-                                                        borderRadius: '2px'
-                                                    }}
-                                                />
-                                            );
-                                        })}
+                    {/* Canvas Area */}
+                    <div style={styles.canvas}>
+                        {/* CREATE TAB */}
+                        {activeTab === 'create' && (
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
+                                {/* Left Column - Inputs */}
+                                <div>
+                                    <div style={styles.card}>
+                                        <h2 style={{ marginBottom: '1.5rem', fontSize: '1.3rem' }}>
+                                            🎵 Text2Music
+                                        </h2>
+
+                                        <label style={styles.label}>Estilo / Tags</label>
+                                        <input
+                                            type="text"
+                                            value={prompt}
+                                            onChange={(e) => setPrompt(e.target.value)}
+                                            placeholder="romantic guitar, sensual vocals, Caribbean..."
+                                            style={styles.input}
+                                        />
+
+                                        <label style={{ ...styles.label, marginTop: '1rem' }}>
+                                            Letras (con [Verse], [Chorus], etc.)
+                                        </label>
+                                        <textarea
+                                            value={lyrics}
+                                            onChange={(e) => setLyrics(e.target.value)}
+                                            placeholder="[Verse 1]
+Bajo la luna de Santo Domingo
+Tu mirada me tiene perdido
+
+[Chorus]
+Bailando bachata contigo
+El tiempo se detiene..."
+                                            style={styles.textarea}
+                                        />
+                                    </div>
+
+                                    <div style={styles.card}>
+                                        <label style={styles.label}>Duración: {duration}s</label>
+                                        <input
+                                            type="range"
+                                            min="30"
+                                            max="240"
+                                            value={duration}
+                                            onChange={(e) => setDuration(parseInt(e.target.value))}
+                                            style={{ ...styles.slider, background: 'rgba(255,255,255,0.3)' }}
+                                        />
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', opacity: 0.5, marginTop: '0.5rem' }}>
+                                            <span>30s</span>
+                                            <span>4 min</span>
+                                        </div>
                                     </div>
                                 </div>
+
+                                {/* Right Column - Antigravity & Generate */}
+                                <div>
+                                    <div style={styles.card}>
+                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
+                                            <h2 style={{ fontSize: '1.3rem' }}>🌀 Antigravity Engine</h2>
+                                            <div style={{
+                                                padding: '0.5rem 1rem',
+                                                borderRadius: '20px',
+                                                background: `${antigravityMode.color}20`,
+                                                border: `1px solid ${antigravityMode.color}50`,
+                                                color: antigravityMode.color,
+                                                fontSize: '0.9rem'
+                                            }}>
+                                                {antigravityMode.emoji} {antigravityMode.name}
+                                            </div>
+                                        </div>
+
+                                        <div style={{
+                                            fontSize: '3rem',
+                                            fontWeight: 'bold',
+                                            textAlign: 'center',
+                                            background: `linear-gradient(90deg, #4ade80, #60a5fa, #f472b6, #c084fc)`,
+                                            WebkitBackgroundClip: 'text',
+                                            WebkitTextFillColor: 'transparent',
+                                            marginBottom: '1rem'
+                                        }}>
+                                            {antigravity}
+                                        </div>
+
+                                        <input
+                                            type="range"
+                                            min="0"
+                                            max="100"
+                                            value={antigravity}
+                                            onChange={(e) => setAntigravity(parseInt(e.target.value))}
+                                            style={styles.slider}
+                                        />
+
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.75rem', fontSize: '0.8rem' }}>
+                                            <span style={{ color: '#4ade80' }}>🎸 Tradicional</span>
+                                            <span style={{ color: '#c084fc' }}>🌀 Experimental</span>
+                                        </div>
+
+                                        <p style={{ marginTop: '1rem', fontSize: '0.85rem', color: 'rgba(255,255,255,0.6)', textAlign: 'center' }}>
+                                            {antigravity < 20 && "Sonido auténtico y fiel al género seleccionado"}
+                                            {antigravity >= 20 && antigravity < 50 && "Equilibrio entre tradición e innovación"}
+                                            {antigravity >= 50 && antigravity < 80 && "Explorando nuevos territorios sonoros"}
+                                            {antigravity >= 80 && "¡Rompiendo todas las reglas musicales!"}
+                                        </p>
+                                    </div>
+
+                                    <button
+                                        onClick={handleGenerate}
+                                        disabled={isGenerating || !aceStepConnected}
+                                        style={{
+                                            ...styles.primaryButton,
+                                            opacity: isGenerating || !aceStepConnected ? 0.6 : 1,
+                                            cursor: isGenerating || !aceStepConnected ? 'not-allowed' : 'pointer'
+                                        }}
+                                    >
+                                        {isGenerating ? (
+                                            <>
+                                                <span className="spinner">⏳</span>
+                                                Generando... {generationProgress}%
+                                            </>
+                                        ) : (
+                                            <>
+                                                ✨ Generar Música
+                                            </>
+                                        )}
+                                    </button>
+
+                                    {isGenerating && (
+                                        <div style={{ marginTop: '1rem' }}>
+                                            <div style={{
+                                                height: '4px',
+                                                borderRadius: '2px',
+                                                background: 'rgba(255,255,255,0.2)',
+                                                overflow: 'hidden'
+                                            }}>
+                                                <div style={{
+                                                    height: '100%',
+                                                    width: `${generationProgress}%`,
+                                                    background: 'linear-gradient(90deg, #00d4ff, #00ff88)',
+                                                    transition: 'width 0.3s'
+                                                }} />
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
                             </div>
-                        ))}
+                        )}
+
+                        {/* RETAKE TAB */}
+                        {activeTab === 'retake' && (
+                            <div style={styles.card}>
+                                <h2 style={{ marginBottom: '1rem' }}>🔄 Variaciones</h2>
+                                <p style={{ color: 'rgba(255,255,255,0.7)', marginBottom: '1.5rem' }}>
+                                    Genera variaciones de tu última canción con diferentes niveles de creatividad.
+                                </p>
+
+                                {generatedAudio ? (
+                                    <div>
+                                        <p>Última generación: <strong>{generatedAudio.job_id}</strong></p>
+                                        <button
+                                            onClick={handleRetake}
+                                            disabled={isGenerating}
+                                            style={{ ...styles.primaryButton, marginTop: '1rem', maxWidth: '300px' }}
+                                        >
+                                            🔄 Generar Variación
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <p style={{ color: 'rgba(255,255,255,0.5)' }}>
+                                        Primero genera una canción en la pestaña "Crear"
+                                    </p>
+                                )}
+                            </div>
+                        )}
+
+                        {/* REPAINT TAB */}
+                        {activeTab === 'repaint' && (
+                            <div style={styles.card}>
+                                <h2 style={{ marginBottom: '1rem' }}>🎨 Repintar Sección</h2>
+                                <p style={{ color: 'rgba(255,255,255,0.7)', marginBottom: '1.5rem' }}>
+                                    Re-genera una sección específica de tu canción manteniendo el resto intacto.
+                                </p>
+                                <p style={{ color: 'rgba(255,255,255,0.5)', fontStyle: 'italic' }}>
+                                    🔜 Próximamente disponible
+                                </p>
+                            </div>
+                        )}
+
+                        {/* EDIT TAB */}
+                        {activeTab === 'edit' && (
+                            <div style={styles.card}>
+                                <h2 style={{ marginBottom: '1rem' }}>✏️ Editar Letras</h2>
+                                <p style={{ color: 'rgba(255,255,255,0.7)', marginBottom: '1.5rem' }}>
+                                    Modifica las letras de tu canción manteniendo la melodía y el acompañamiento.
+                                </p>
+                                <p style={{ color: 'rgba(255,255,255,0.5)', fontStyle: 'italic' }}>
+                                    🔜 Próximamente disponible
+                                </p>
+                            </div>
+                        )}
+
+                        {/* EXTEND TAB */}
+                        {activeTab === 'extend' && (
+                            <div style={styles.card}>
+                                <h2 style={{ marginBottom: '1rem' }}>➕ Extender</h2>
+                                <p style={{ color: 'rgba(255,255,255,0.7)', marginBottom: '1.5rem' }}>
+                                    Añade música al principio o al final de tu canción existente.
+                                </p>
+                                <p style={{ color: 'rgba(255,255,255,0.5)', fontStyle: 'italic' }}>
+                                    🔜 Próximamente disponible
+                                </p>
+                            </div>
+                        )}
                     </div>
-                </div>
+                </main>
             </div>
 
-            {/* Bottom Panel - Effects/Tools */}
-            <div style={{
-                height: '120px',
-                borderTop: '1px solid rgba(255,255,255,0.1)',
-                background: 'rgba(0,0,0,0.4)',
-                padding: '1rem',
-                display: 'flex',
-                gap: '1rem'
-            }}>
-                <div style={{
-                    padding: '1rem',
-                    background: 'rgba(255,255,255,0.05)',
-                    borderRadius: '8px',
-                    minWidth: '150px',
-                    textAlign: 'center'
-                }}>
-                    <div style={{ fontSize: '0.85rem', color: 'var(--text-gray)', marginBottom: '0.5rem' }}>Master</div>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}>
-                        <div style={{
-                            width: '8px',
-                            height: '60px',
-                            background: 'linear-gradient(to top, #4caf50, var(--gold), #ff4444)',
-                            borderRadius: '4px',
-                            position: 'relative'
-                        }}>
-                            <div style={{
-                                position: 'absolute',
-                                bottom: '70%',
-                                left: '-4px',
-                                width: '16px',
-                                height: '4px',
-                                background: 'white',
-                                borderRadius: '2px'
-                            }} />
-                        </div>
-                        <div style={{
-                            width: '8px',
-                            height: '60px',
-                            background: 'linear-gradient(to top, #4caf50, var(--gold), #ff4444)',
-                            borderRadius: '4px',
-                            position: 'relative'
-                        }}>
-                            <div style={{
-                                position: 'absolute',
-                                bottom: '65%',
-                                left: '-4px',
-                                width: '16px',
-                                height: '4px',
-                                background: 'white',
-                                borderRadius: '2px'
-                            }} />
-                        </div>
-                    </div>
-                </div>
-
-                {/* Quick Effects */}
-                {['EQ', 'Compressor', 'Reverb', 'Delay'].map(effect => (
-                    <button
-                        key={effect}
-                        style={{
-                            padding: '1rem',
-                            background: 'rgba(255,255,255,0.05)',
-                            border: '1px solid rgba(255,255,255,0.2)',
-                            borderRadius: '8px',
-                            color: 'var(--text-gray)',
-                            cursor: 'pointer',
-                            minWidth: '100px'
-                        }}
-                    >
-                        {effect}
+            {/* Audio Player */}
+            {generatedAudio && (
+                <footer style={styles.player}>
+                    <button onClick={togglePlayback} style={styles.playButton}>
+                        {isPlaying ? '⏸️' : '▶️'}
                     </button>
-                ))}
 
-                <div style={{ flex: 1 }} />
+                    <div style={{ minWidth: '60px', fontSize: '0.9rem' }}>
+                        {formatTime(currentTime)}
+                    </div>
 
-                {/* Export */}
-                <button style={{
-                    padding: '1rem 2rem',
-                    background: 'var(--gold)',
-                    border: 'none',
-                    borderRadius: '8px',
-                    color: 'black',
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.5rem'
-                }}>
-                    ⬇️ Exportar
-                </button>
-            </div>
+                    <div style={styles.progressBar}>
+                        <div style={{
+                            position: 'absolute',
+                            left: 0,
+                            top: 0,
+                            height: '100%',
+                            width: `${totalDuration ? (currentTime / totalDuration) * 100 : 0}%`,
+                            background: 'linear-gradient(90deg, #00d4ff, #00ff88)',
+                            borderRadius: '3px'
+                        }} />
+                    </div>
+
+                    <div style={{ minWidth: '60px', fontSize: '0.9rem', textAlign: 'right' }}>
+                        {formatTime(totalDuration)}
+                    </div>
+
+                    <div style={{ marginLeft: '1rem', color: 'rgba(255,255,255,0.7)', fontSize: '0.85rem' }}>
+                        🎵 {generatedAudio.job_id}
+                    </div>
+
+                    <audio
+                        ref={audioRef}
+                        src={`${API_BASE}/audio/${generatedAudio.job_id}.wav`}
+                        onTimeUpdate={handleTimeUpdate}
+                        onEnded={() => setIsPlaying(false)}
+                        onLoadedMetadata={handleTimeUpdate}
+                    />
+                </footer>
+            )}
         </div>
     );
 }
