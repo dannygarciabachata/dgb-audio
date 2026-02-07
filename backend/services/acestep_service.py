@@ -22,7 +22,9 @@ import shutil
 from gradio_client import Client, handle_file
 
 # ACE-Step Gradio Configuration
+# Can be overridden with environment variable for remote GPU server
 ACESTEP_URL = os.getenv("ACESTEP_URL", "http://localhost:7870")
+
 
 # Output directory for generated audio
 OUTPUT_DIR = Path(__file__).parent.parent.parent / "generated_audio"
@@ -153,37 +155,43 @@ def generate_music(
     # Generate seed if random
     actual_seed = seed if seed > 0 else random.randint(1, 999999)
     
+    # Format lyrics
+    formatted_lyrics = lyrics if lyrics.strip() else "[instrumental]"
+    
     try:
         client = get_gradio_client()
         
-        # Call ACE-Step Text2Music endpoint
-        # Based on Gradio interface: (tags, lyrics, duration, ..., guidance_scale, infer_step, ...)
+        # Call ACE-Step using api_name='/__call__' with correct parameter order
         result = client.predict(
-            # Basic inputs
-            prompt,                          # Tags/prompt
-            lyrics if lyrics else "[instrumental]",  # Lyrics
-            duration,                        # Audio duration
-            # Generation parameters
-            params["infer_step"],           # Inference steps
-            params["guidance_scale"],       # Guidance scale
-            params["scheduler_type"],       # Scheduler type
-            params["cfg_type"],             # CFG type
-            params["omega_scale"],          # Omega scale
-            str(actual_seed),               # Manual seeds
-            0.5,                            # guidance_interval
-            0.0,                            # guidance_interval_decay
-            3.0,                            # min_guidance_scale
-            True,                           # use_erg_tag
-            True,                           # use_erg_lyric
-            True,                           # use_erg_diffusion
-            "60, 80",                       # oss_steps
-            0.0,                            # guidance_scale_text
-            0.0,                            # guidance_scale_lyric
-            fn_index=0                      # Text2Music function
+            "wav",                           # format
+            float(duration),                 # audio_duration
+            prompt,                          # prompt (tags)
+            formatted_lyrics,                # lyrics
+            params["infer_step"],            # infer_step
+            params["guidance_scale"],        # guidance_scale
+            params["scheduler_type"],        # scheduler_type
+            params["cfg_type"],              # cfg_type
+            params["omega_scale"],           # omega_scale
+            str(actual_seed),                # manual_seeds
+            0.5,                             # guidance_interval
+            0.0,                             # guidance_interval_decay
+            3.0,                             # min_guidance_scale
+            True,                            # use_erg_tag
+            False,                           # use_erg_lyric
+            True,                            # use_erg_diffusion
+            None,                            # oss_steps
+            0.0,                             # guidance_scale_text
+            0.0,                             # guidance_scale_lyric
+            False,                           # audio2audio_enable
+            0.5,                             # ref_audio_strength
+            None,                            # ref_audio_input
+            "none",                          # lora_name_or_path
+            1.0,                             # lora_weight
+            api_name="/__call__"
         )
         
-        # Result is typically a tuple with (audio_path, ...)
-        audio_path = result if isinstance(result, str) else result[0]
+        # Result is (audio_path, parameters_json)
+        audio_path = result[0] if isinstance(result, tuple) else result
         
         # Copy to our output directory
         if audio_path and os.path.exists(audio_path):
@@ -211,6 +219,7 @@ def generate_music(
             "error": str(e),
             "message": "Check if ACE-Step is running on port 7870"
         }
+
 
 
 async def generate_music_async(
